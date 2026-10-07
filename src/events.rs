@@ -163,11 +163,18 @@ pub enum AppEvent {
         seq: Option<u64>,
     },
     /// A new version is available through the active installation manager.
+    // DEMIGOD fork (risk-review item 2): self-update is disabled; kept for
+    // the (disabled) update machinery's unit tests.
+    #[allow(dead_code)]
     UpdateReady {
         version: String,
         install_command: String,
     },
     /// Remote agent detection manifest update check finished.
+    // DEMIGOD fork (risk-review item 1): manifest updates are disabled; the
+    // event is still emitted (with an empty update set) by the disabled
+    // manifest_update::auto_update.
+    #[allow(dead_code)]
     AgentDetectionManifestsUpdated {
         updated: Vec<crate::detect::manifest_update::ManifestUpdateCommit>,
         activated: Vec<crate::detect::Agent>,

@@ -382,7 +382,7 @@ pub(crate) mod unix_image_files;
 #[cfg(unix)]
 pub(crate) use unix_common::{
     begin_cli_output, end_cli_output, forward_remote_bridge_stdio, ignore_server_hangup,
-    local_stream_peer_description, spawn_server_signal_monitor, RemoteBridgeWake,
+    local_stream_peer_uid, spawn_server_signal_monitor, RemoteBridgeWake,
 };
 
 mod client_state;
@@ -396,7 +396,11 @@ pub(crate) fn end_cli_output() {}
 
 #[cfg(target_os = "linux")]
 mod linux;
+// NOTE: rustc's unused_imports lint false-positives on this glob (the names
+// are used via crate::platform:: — removing it breaks the build with ~80
+// unresolved-name errors), so the lint is silenced here.
 #[cfg(target_os = "linux")]
+#[allow(unused_imports)]
 pub use linux::*;
 
 #[cfg(target_os = "macos")]

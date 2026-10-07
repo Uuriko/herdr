@@ -85,6 +85,104 @@ pub fn validate_resume_argv(argv: &[String]) -> Result<(), String> {
     if !plain_command {
         return Err("resume_argv must start with a plain command name, not a path".into());
     }
+    // DEMIGOD fork (risk-review item 13): the command must be an allowlisted
+    // agent CLI, and flags must come from the allowlisted resume-flag set.
+    // Operators extend the CLI set with DEMIGOD_RESUME_CLI_ALLOWLIST
+    // (comma-separated command names) and the flag set with
+    // DEMIGOD_RESUME_FLAG_ALLOWLIST.
+    if !resume_cli_allowed(command) {
+        return Err(format!(
+            "resume_argv command {command:?} is not in the allowlisted agent CLIs"
+        ));
+    }
+    validate_resume_flags(&argv[1..])?;
+    Ok(())
+}
+
+/// Default allowlisted agent CLI command names for resume argv. These are the
+/// agent binaries herdr knows how to resume natively; operators extend the set
+/// with DEMIGOD_RESUME_CLI_ALLOWLIST.
+const DEFAULT_RESUME_CLI_ALLOWLIST: &[&str] = &[
+    "claude",
+    "codex",
+    "opencode",
+    "gemini",
+    "cursor-agent",
+    "copilot",
+    "amp",
+    "aichat",
+    "qwen",
+    "kimi",
+    "grok",
+    "hermes",
+    "droid",
+    "pi",
+];
+
+/// Default allowlisted resume flags. Resume argv is `<cli> <flag> <value>...`;
+/// anything else is rejected so a compromised reporter cannot smuggle
+/// arbitrary agent-CLI flags (e.g. permission bypasses) through the server.
+/// Shared by the agent.start gate (DEMIGOD fork, risk-review item 7).
+pub(crate) const DEFAULT_RESUME_FLAG_ALLOWLIST: &[&str] = &[
+    "--resume",
+    "-r",
+    "--continue",
+    "-c",
+    "--session-id",
+    "--session",
+    "--conversation-id",
+];
+
+pub(crate) fn allowlist_from_env(env_var: &str, default: &[&str]) -> Vec<String> {
+    match std::env::var(env_var) {
+        Ok(value) if !value.trim().is_empty() => value
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => default.iter().map(|entry| entry.to_string()).collect(),
+    }
+}
+
+fn resume_cli_allowed(command: &str) -> bool {
+    allowlist_from_env("DEMIGOD_RESUME_CLI_ALLOWLIST", DEFAULT_RESUME_CLI_ALLOWLIST)
+        .iter()
+        .any(|allowed| allowed == command)
+}
+
+pub(crate) fn validate_resume_flags(args: &[String]) -> Result<(), String> {
+    let allowed_flags = allowlist_from_env(
+        "DEMIGOD_RESUME_FLAG_ALLOWLIST",
+        DEFAULT_RESUME_FLAG_ALLOWLIST,
+    );
+    let mut expect_value = false;
+    for arg in args {
+        if expect_value {
+            // A value position: must not itself look like a flag, so a
+            // smuggled flag cannot ride as "the session id".
+            if arg.starts_with('-') && arg.len() > 1 {
+                return Err(format!(
+                    "resume_argv flag value must not start with '-': {arg:?}"
+                ));
+            }
+            expect_value = false;
+            continue;
+        }
+        if arg.starts_with("--") || (arg.starts_with('-') && arg.len() > 1) {
+            if !allowed_flags.iter().any(|flag| flag == arg) {
+                return Err(format!("resume_argv flag {arg:?} is not allowlisted"));
+            }
+            expect_value = true;
+            continue;
+        }
+        return Err(format!(
+            "resume_argv argument {arg:?} must follow an allowlisted flag"
+        ));
+    }
+    if expect_value {
+        return Err("resume_argv ends with a flag that needs a value".into());
+    }
     Ok(())
 }
 
@@ -377,30 +475,46 @@ mod tests {
 
     #[test]
     fn reported_resume_argv_requires_a_plain_command_name() {
-        assert!(validate_resume_argv(&argv(&[
-            "prime-agent",
-            "--resume",
-            "01a0de21",
-            "--model",
-            "gpt 6"
-        ]))
-        .is_ok());
-        assert!(validate_resume_argv(&argv(&["cursor-agent.cmd", "--resume", "id"])).is_ok());
+        assert!(validate_resume_argv(&argv(&["codex", "--resume", "01a0de21"])).is_ok());
+        assert!(validate_resume_argv(&argv(&["cursor-agent", "--resume", "id"])).is_ok());
 
         for invalid in [
             argv(&[]),
             argv(&[""]),
-            argv(&["/usr/bin/prime-agent", "--resume", "id"]),
-            argv(&["C:\\Program Files\\Prime\\prime.exe"]),
-            argv(&["prime agent"]),
-            argv(&["-prime"]),
-            argv(&["prime-agent", "bad\nline"]),
-            argv(&["prime-agent", "--name", "can's session"]),
-            vec!["prime-agent".to_string(); MAX_RESUME_ARGS + 1],
-            argv(&["prime-agent", &"x".repeat(MAX_RESUME_ARGV_BYTES)]),
+            argv(&["/usr/bin/codex", "--resume", "id"]),
+            argv(&["codex agent"]),
+            argv(&["-codex"]),
+            argv(&["codex", "bad\nline"]),
+            argv(&["codex", "--name", "can's session"]),
+            vec!["codex".to_string(); MAX_RESUME_ARGS + 1],
+            argv(&["codex", &"x".repeat(MAX_RESUME_ARGV_BYTES)]),
         ] {
             assert!(validate_resume_argv(&invalid).is_err(), "{invalid:?}");
         }
+    }
+
+    #[test]
+    fn reported_resume_argv_enforces_demigod_allowlist() {
+        // DEMIGOD fork (risk-review item 13): the command must be an
+        // allowlisted agent CLI and flags must come from the allowlisted set.
+        for invalid in [
+            // Unknown agent CLI.
+            argv(&["prime-agent", "--resume", "01a0de21"]),
+            // Non-resume flag (could smuggle agent-CLI behavior switches).
+            argv(&["codex", "--resume", "id", "--model", "gpt-6"]),
+            // Flag value that is itself a flag.
+            argv(&["codex", "--resume", "--continue"]),
+            // Bare positional argument with no preceding flag.
+            argv(&["codex", "01a0de21"]),
+            // Dangling flag.
+            argv(&["codex", "--resume"]),
+        ] {
+            assert!(validate_resume_argv(&invalid).is_err(), "{invalid:?}");
+        }
+
+        assert!(validate_resume_argv(&argv(&["codex", "--continue", "abc"])).is_ok());
+        assert!(validate_resume_argv(&argv(&["codex", "-r", "abc"])).is_ok());
+        assert!(validate_resume_argv(&argv(&["codex"])).is_ok());
     }
 
     #[test]

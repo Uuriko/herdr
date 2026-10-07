@@ -287,6 +287,9 @@ pub(crate) fn reload_manifests() -> Vec<AgentManifestSummary> {
     summaries
 }
 
+// DEMIGOD fork (risk-review item 1): remote manifest updates are disabled, so
+// nothing calls this outside unit tests. Kept for the manifest tests.
+#[allow(dead_code)]
 pub(crate) fn reload_manifests_for_agents(agents: &[Agent]) {
     if agents.is_empty() {
         return;

@@ -1,3 +1,8 @@
+// DEMIGOD fork (risk-review item 2): product announcements are disabled
+// (`load_unseen_for_current_version` returns None). The storage helpers are
+// kept for their unit tests, hence the module-wide dead-code allowance.
+#![allow(dead_code)]
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
@@ -97,9 +102,10 @@ pub fn save_manifest_announcement(
     Ok(Some(product_announcement))
 }
 
+/// DEMIGOD fork (risk-review item 2): product announcements are disabled.
+/// No announcement content is ever loaded or shown.
 pub fn load_unseen_for_current_version() -> Option<ProductAnnouncement> {
-    load_fake_for_current_version()
-        .or_else(|| load_unseen_from_path(&store_path(), &crate::build_info::version()))
+    None
 }
 
 pub fn mark_seen(version: &str, id: &str) -> io::Result<()> {

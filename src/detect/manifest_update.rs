@@ -2,9 +2,8 @@ use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     fmt, fs,
-    io::{Read, Write},
+    io::Write,
     path::{Path, PathBuf},
-    process::Stdio,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -13,9 +12,6 @@ use serde::{Deserialize, Serialize};
 use super::{agent_label, parse_agent_label, Agent};
 
 pub(crate) const MANIFEST_ENGINE_VERSION: u32 = 3;
-const DEFAULT_CATALOG_URL: &str = "https://herdr.dev/agent-detection/index.toml";
-const CATALOG_URL_ENV: &str = "HERDR_AGENT_DETECTION_MANIFEST_CATALOG_URL";
-const MAX_FETCH_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ManifestVersion(String);
@@ -160,35 +156,27 @@ struct ManifestCatalogAgent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+// DEMIGOD fork: remote fetch disabled; kept for unit tests, unreachable
+// in non-test builds since the only caller (check_and_update_from_url)
+// was removed.
+#[allow(dead_code)]
 struct CatalogAgent {
     agent: Agent,
     path: String,
 }
 
+// DEMIGOD fork: remote fetch disabled; kept for the disabled-behavior
+// unit test, unreachable in non-test builds.
+#[allow(dead_code)]
 pub(crate) fn auto_update(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
-    let result = check_and_update();
-    let status = match result {
-        Ok(output) => {
-            let activated = agents_needing_cache_reload(&output);
-            if !activated.is_empty() {
-                super::manifest::reload_manifests_for_agents(&activated);
-            }
-            let _ = events.blocking_send(crate::events::AppEvent::AgentDetectionManifestsUpdated {
-                updated: output.updated,
-                activated,
-                status: output.status,
-            });
-            return;
-        }
-        Err(err) => {
-            tracing::warn!("agent detection manifest update failed: {err}");
-            let mut status = load_status();
-            status.last_check_unix = Some(now_unix());
-            status.last_result = Some(format!("failed: {err}"));
-            let _ = save_status(&status);
-            status
-        }
-    };
+    // DEMIGOD fork hardening (risk-review item 1): remote manifest catalog
+    // updates are disabled. Manifests are frozen at the vendored set; the
+    // state vocabulary is fed by trusted self-reports (pane.report_agent*),
+    // not by a live supply-chain input.
+    let mut status = load_status();
+    status.last_check_unix = Some(now_unix());
+    status.last_result = Some("disabled in this build: manifests are vendored and frozen".into());
+    let _ = save_status(&status);
     let _ = events.blocking_send(crate::events::AppEvent::AgentDetectionManifestsUpdated {
         updated: Vec::new(),
         activated: Vec::new(),
@@ -196,6 +184,10 @@ pub(crate) fn auto_update(events: tokio::sync::mpsc::Sender<crate::events::AppEv
     });
 }
 
+// DEMIGOD fork: remote fetch disabled; kept for unit tests, unreachable
+// in non-test builds since the only caller (check_and_update_from_url)
+// was removed.
+#[allow(dead_code)]
 fn agents_needing_cache_reload(output: &ManifestUpdateOutput) -> Vec<Agent> {
     let loaded = super::manifest::manifest_summaries();
     let mut activated = output
@@ -233,84 +225,16 @@ pub(crate) struct ManifestUpdateOutput {
 }
 
 pub(crate) fn check_and_update() -> Result<ManifestUpdateOutput, String> {
-    check_and_update_from_url(&catalog_url())
+    // DEMIGOD fork hardening (risk-review item 1): the remote catalog fetch is
+    // never performed. The env-var override (HERDR_AGENT_DETECTION_MANIFEST_CATALOG_URL)
+    // is ignored: there is no code path that reads it anymore.
+    Err("agent detection manifest updates are disabled in this build; manifests are vendored and frozen".to_string())
 }
 
-fn check_and_update_from_url(url: &str) -> Result<ManifestUpdateOutput, String> {
-    let catalog = parse_catalog(&fetch_text(url)?)?;
-    let base_url = base_url(url)?;
-    let mut status = load_status();
-    let check_time = now_unix();
-    status.last_check_unix = Some(check_time);
-    status.last_result = Some("checked".to_string());
-
-    let checked = catalog.iter().map(|entry| entry.agent).collect::<Vec<_>>();
-    let mut updated = Vec::new();
-    for entry in catalog {
-        let agent_id = agent_label(entry.agent).to_string();
-        let manifest_url = join_url(&base_url, &entry.path)?;
-        match fetch_text(&manifest_url)
-            .map_err(|err| format!("fetch failed: {err}"))
-            .and_then(|content| process_agent_manifest(entry.agent, &content, check_time))
-        {
-            Ok(Some(commit)) => {
-                status.agents.insert(
-                    agent_id,
-                    AgentRemoteStatus {
-                        cached_version: Some(commit.version.to_string()),
-                        attempted_version: Some(commit.version.to_string()),
-                        last_checked_unix: Some(check_time),
-                        last_result: "updated".to_string(),
-                        last_error: None,
-                    },
-                );
-                updated.push(commit);
-            }
-            Ok(None) => {
-                let cached_version = cached_remote_version(entry.agent);
-                status.agents.insert(
-                    agent_id,
-                    AgentRemoteStatus {
-                        cached_version: cached_version.map(|version| version.to_string()),
-                        attempted_version: None,
-                        last_checked_unix: Some(check_time),
-                        last_result: "current".to_string(),
-                        last_error: None,
-                    },
-                );
-            }
-            Err(err) => {
-                tracing::warn!(
-                    agent = agent_label(entry.agent),
-                    error = %err,
-                    "agent detection manifest update failed for agent"
-                );
-                let cached_version = cached_remote_version(entry.agent);
-                status.agents.insert(
-                    agent_id,
-                    AgentRemoteStatus {
-                        cached_version: cached_version.map(|version| version.to_string()),
-                        attempted_version: None,
-                        last_checked_unix: Some(check_time),
-                        last_result: "failed".to_string(),
-                        last_error: Some(err),
-                    },
-                );
-            }
-        }
-    }
-
-    if let Err(err) = save_status(&status) {
-        tracing::warn!("failed to save agent detection manifest update status: {err}");
-        status.last_result = Some(format!("failed_to_save_status: {err}"));
-    }
-    Ok(ManifestUpdateOutput {
-        checked,
-        updated,
-        status,
-    })
-}
-
+// DEMIGOD fork: remote fetch disabled; kept for unit tests, unreachable
+// in non-test builds since the only caller (check_and_update_from_url)
+// was removed.
+#[allow(dead_code)]
 fn process_agent_manifest(
     agent: Agent,
     content: &str,
@@ -346,6 +270,10 @@ fn process_agent_manifest(
     }))
 }
 
+// DEMIGOD fork: remote fetch disabled; kept for unit tests, unreachable
+// in non-test builds since the only caller (check_and_update_from_url)
+// was removed.
+#[allow(dead_code)]
 fn parse_catalog(content: &str) -> Result<Vec<CatalogAgent>, String> {
     let catalog: ManifestCatalog =
         toml::from_str(content).map_err(|err| format!("failed to parse catalog TOML: {err}"))?;
@@ -400,6 +328,9 @@ pub(crate) fn load_status() -> ManifestUpdateStatus {
     })
 }
 
+// DEMIGOD fork: remote fetch disabled; kept for the disabled-behavior
+// unit test, unreachable in non-test builds.
+#[allow(dead_code)]
 fn save_status(status: &ManifestUpdateStatus) -> Result<(), String> {
     let path = status_path();
     let parent = path
@@ -420,6 +351,10 @@ pub(crate) fn remote_manifest_path(agent: Agent) -> PathBuf {
         .join(format!("{}.toml", agent_label(agent)))
 }
 
+// DEMIGOD fork: remote fetch disabled; kept for unit tests, unreachable
+// in non-test builds since the only caller (check_and_update_from_url)
+// was removed.
+#[allow(dead_code)]
 pub(crate) fn cached_remote_version(agent: Agent) -> Option<ManifestVersion> {
     let content = fs::read_to_string(remote_manifest_path(agent)).ok()?;
     super::manifest::parse_remote_manifest_for_agent(agent, &content)
@@ -427,6 +362,10 @@ pub(crate) fn cached_remote_version(agent: Agent) -> Option<ManifestVersion> {
         .map(|parsed| parsed.version)
 }
 
+// DEMIGOD fork: remote fetch disabled; kept for unit tests, unreachable
+// in non-test builds since the only caller (check_and_update_from_url)
+// was removed.
+#[allow(dead_code)]
 fn commit_remote_manifest(agent: Agent, content: &str) -> Result<(), String> {
     let path = remote_manifest_path(agent);
     let parent = path
@@ -498,78 +437,9 @@ fn state_root() -> PathBuf {
     crate::config::state_dir().join("agent-detection")
 }
 
-fn catalog_url() -> String {
-    std::env::var(CATALOG_URL_ENV)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_CATALOG_URL.to_string())
-}
-
-fn fetch_text(url: &str) -> Result<String, String> {
-    let max_fetch_bytes = MAX_FETCH_BYTES.to_string();
-    let mut child = crate::noninteractive_process::curl_command()
-        .args([
-            "-sfL",
-            "--retry",
-            "2",
-            "--connect-timeout",
-            "5",
-            "--max-time",
-            "15",
-            "--max-filesize",
-            &max_fetch_bytes,
-            url,
-        ])
-        .stdout(Stdio::piped())
-        .spawn()
-        .map_err(|err| format!("curl failed: {err}"))?;
-
-    let mut bytes = Vec::new();
-    let Some(stdout) = child.stdout.as_mut() else {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err("curl stdout was not captured".to_string());
-    };
-    stdout
-        .take((MAX_FETCH_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|err| {
-            let _ = child.kill();
-            let _ = child.wait();
-            format!("failed to read curl response: {err}")
-        })?;
-    if bytes.len() > MAX_FETCH_BYTES {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(format!(
-            "response from {url} exceeded {MAX_FETCH_BYTES} bytes"
-        ));
-    }
-
-    let status = child
-        .wait()
-        .map_err(|err| format!("curl wait failed: {err}"))?;
-    if !status.success() {
-        return Err(format!("failed to fetch {url}"));
-    }
-    String::from_utf8(bytes).map_err(|err| format!("response was not UTF-8: {err}"))
-}
-
-fn base_url(url: &str) -> Result<String, String> {
-    let Some((base, _)) = url.rsplit_once('/') else {
-        return Err(format!("catalog URL {url} has no base path"));
-    };
-    Ok(base.to_string())
-}
-
-fn join_url(base: &str, path: &str) -> Result<String, String> {
-    if path.contains("://") || path.starts_with('/') || path.split('/').any(|part| part == "..") {
-        return Err(format!("unsafe manifest path {path}"));
-    }
-    Ok(format!("{}/{}", base.trim_end_matches('/'), path))
-}
-
+// DEMIGOD fork: remote fetch disabled; kept for the disabled-behavior
+// unit test, unreachable in non-test builds.
+#[allow(dead_code)]
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -674,187 +544,14 @@ contains = ["{contains}"]
     }
 
     #[test]
-    fn auto_update_reloads_manifest_cache_after_remote_commit() {
-        with_state_dir("auto-update-reloads-cache", || {
-            let old_catalog_url = std::env::var_os(CATALOG_URL_ENV);
-            let web_dir = std::env::temp_dir()
-                .join(format!("herdr-manifest-update-web-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&web_dir);
-            fs::create_dir_all(&web_dir).unwrap();
-            fs::write(
-                web_dir.join("index.toml"),
-                r#"
-schema_version = 1
-
-[[agents]]
-id = "codex"
-path = "codex.toml"
-"#,
-            )
-            .unwrap();
-            fs::write(
-                web_dir.join("codex.toml"),
-                remote_manifest("9999.01.01.1", "auto-update-ready"),
-            )
-            .unwrap();
+    fn auto_update_is_disabled_in_demigod_build() {
+        // DEMIGOD fork (risk-review item 1): remote manifest updates are
+        // disabled. Even with a catalog override set, no fetch happens, no
+        // manifests are committed, and the status records the disabled state.
+        with_state_dir("auto-update-disabled", || {
             std::env::set_var(
-                CATALOG_URL_ENV,
-                format!(
-                    "file:///{}",
-                    web_dir
-                        .join("index.toml")
-                        .to_string_lossy()
-                        .replace('\\', "/")
-                        .trim_start_matches('/')
-                ),
-            );
-
-            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-            auto_update(tx);
-
-            let event = rx.try_recv().expect("manifest update event");
-            let crate::events::AppEvent::AgentDetectionManifestsUpdated { updated, .. } = event
-            else {
-                panic!("unexpected event");
-            };
-            assert_eq!(updated.len(), 1);
-            assert_eq!(updated[0].agent, Agent::Codex);
-
-            let explain = crate::detect::manifest::explain(Agent::Codex, "auto-update-ready");
-            assert_eq!(explain.state, crate::detect::AgentState::Idle);
-            assert!(matches!(
-                explain.source,
-                Some(crate::detect::manifest::ManifestSource::Remote { .. })
-            ));
-            assert_eq!(
-                explain.matched_rule.as_ref().map(|rule| rule.id.as_str()),
-                Some("idle")
-            );
-
-            match old_catalog_url {
-                Some(value) => std::env::set_var(CATALOG_URL_ENV, value),
-                None => std::env::remove_var(CATALOG_URL_ENV),
-            }
-            let _ = fs::remove_dir_all(&web_dir);
-        });
-    }
-
-    #[test]
-    fn auto_update_reloads_manifest_cache_when_remote_is_already_current() {
-        with_state_dir("auto-update-reloads-current-cache", || {
-            let initial = remote_manifest("9999.01.01.1", "initial-ready");
-            process_agent_manifest(Agent::Codex, &initial, 1).unwrap();
-            crate::detect::manifest::reload_manifests();
-
-            let old_catalog_url = std::env::var_os(CATALOG_URL_ENV);
-            let web_dir = std::env::temp_dir().join(format!(
-                "herdr-manifest-update-current-web-{}",
-                std::process::id()
-            ));
-            let _ = fs::remove_dir_all(&web_dir);
-            fs::create_dir_all(&web_dir).unwrap();
-            fs::write(
-                web_dir.join("index.toml"),
-                r#"
-schema_version = 1
-
-[[agents]]
-id = "codex"
-path = "codex.toml"
-"#,
-            )
-            .unwrap();
-            let current = remote_manifest("9999.01.01.2", "current-ready");
-            fs::write(web_dir.join("codex.toml"), &current).unwrap();
-            fs::write(remote_manifest_path(Agent::Codex), current).unwrap();
-            std::env::set_var(
-                CATALOG_URL_ENV,
-                format!(
-                    "file:///{}",
-                    web_dir
-                        .join("index.toml")
-                        .to_string_lossy()
-                        .replace('\\', "/")
-                        .trim_start_matches('/')
-                ),
-            );
-
-            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-            auto_update(tx);
-
-            let event = rx.try_recv().expect("manifest update event");
-            let crate::events::AppEvent::AgentDetectionManifestsUpdated { updated, .. } = event
-            else {
-                panic!("unexpected event");
-            };
-            assert!(updated.is_empty());
-
-            let explain = crate::detect::manifest::explain(Agent::Codex, "current-ready");
-            assert_eq!(explain.state, crate::detect::AgentState::Idle);
-            assert_eq!(explain.manifest_version.as_deref(), Some("9999.01.01.2"));
-            assert_eq!(
-                explain.matched_rule.as_ref().map(|rule| rule.id.as_str()),
-                Some("idle")
-            );
-
-            match old_catalog_url {
-                Some(value) => std::env::set_var(CATALOG_URL_ENV, value),
-                None => std::env::remove_var(CATALOG_URL_ENV),
-            }
-            let _ = fs::remove_dir_all(&web_dir);
-        });
-    }
-
-    #[test]
-    fn auto_update_does_not_reload_agents_whose_check_failed() {
-        with_state_dir("auto-update-skips-failed-agent", || {
-            let initial_codex = remote_manifest("9999.01.01.1", "codex-initial-ready");
-            process_agent_manifest(Agent::Codex, &initial_codex, 1).unwrap();
-            let initial_cursor =
-                remote_manifest_for("cursor", "9999.01.01.1", "cursor-initial-ready");
-            process_agent_manifest(Agent::Cursor, &initial_cursor, 1).unwrap();
-            crate::detect::manifest::reload_manifests();
-
-            let old_catalog_url = std::env::var_os(CATALOG_URL_ENV);
-            let web_dir = std::env::temp_dir().join(format!(
-                "herdr-manifest-update-partial-web-{}",
-                std::process::id()
-            ));
-            let _ = fs::remove_dir_all(&web_dir);
-            fs::create_dir_all(&web_dir).unwrap();
-            fs::write(
-                web_dir.join("index.toml"),
-                r#"
-schema_version = 1
-
-[[agents]]
-id = "codex"
-path = "codex.toml"
-
-[[agents]]
-id = "cursor"
-path = "missing-cursor.toml"
-"#,
-            )
-            .unwrap();
-            let current_codex = remote_manifest("9999.01.01.2", "codex-current-ready");
-            fs::write(web_dir.join("codex.toml"), &current_codex).unwrap();
-            fs::write(remote_manifest_path(Agent::Codex), current_codex).unwrap();
-            fs::write(
-                remote_manifest_path(Agent::Cursor),
-                remote_manifest_for("cursor", "9999.01.01.2", "cursor-current-ready"),
-            )
-            .unwrap();
-            std::env::set_var(
-                CATALOG_URL_ENV,
-                format!(
-                    "file:///{}",
-                    web_dir
-                        .join("index.toml")
-                        .to_string_lossy()
-                        .replace('\\', "/")
-                        .trim_start_matches('/')
-                ),
+                "HERDR_AGENT_DETECTION_MANIFEST_CATALOG_URL",
+                "https://example.invalid/index.toml",
             );
 
             let (tx, mut rx) = tokio::sync::mpsc::channel(1);
@@ -862,32 +559,23 @@ path = "missing-cursor.toml"
 
             let event = rx.try_recv().expect("manifest update event");
             let crate::events::AppEvent::AgentDetectionManifestsUpdated {
-                updated, activated, ..
+                updated,
+                activated,
+                status,
             } = event
             else {
                 panic!("unexpected event");
             };
             assert!(updated.is_empty());
-            assert_eq!(activated, vec![Agent::Codex]);
+            assert!(activated.is_empty());
+            assert!(status
+                .last_result
+                .as_deref()
+                .unwrap_or_default()
+                .contains("disabled"));
+            assert!(check_and_update().is_err());
 
-            let codex = crate::detect::manifest::explain(Agent::Codex, "codex-current-ready");
-            assert_eq!(codex.manifest_version.as_deref(), Some("9999.01.01.2"));
-            assert_eq!(
-                codex.matched_rule.as_ref().map(|rule| rule.id.as_str()),
-                Some("idle")
-            );
-            let cursor = crate::detect::manifest::explain(Agent::Cursor, "cursor-initial-ready");
-            assert_eq!(cursor.manifest_version.as_deref(), Some("9999.01.01.1"));
-            assert_eq!(
-                cursor.matched_rule.as_ref().map(|rule| rule.id.as_str()),
-                Some("idle")
-            );
-
-            match old_catalog_url {
-                Some(value) => std::env::set_var(CATALOG_URL_ENV, value),
-                None => std::env::remove_var(CATALOG_URL_ENV),
-            }
-            let _ = fs::remove_dir_all(&web_dir);
+            std::env::remove_var("HERDR_AGENT_DETECTION_MANIFEST_CATALOG_URL");
         });
     }
 

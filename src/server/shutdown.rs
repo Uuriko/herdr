@@ -9,6 +9,10 @@ use crate::platform::ServerQuitSignal;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ShutdownReason {
     Signal(ServerQuitSignal),
+    // DEMIGOD fork: server.stop was removed from the socket API, so nothing
+    // constructs this in production. Kept for the unit test that drives a
+    // stop-in-flight through ServerStop::request.
+    #[allow(dead_code)]
     ApiStop { caller: Option<String> },
     HostShutdown,
     Unknown,

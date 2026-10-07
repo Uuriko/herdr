@@ -5,6 +5,12 @@
 //! Background checks only surface availability and release notes.
 //! Uses `curl` as a subprocess for HTTP — no additional Rust HTTP dependencies.
 //! JSON parsing uses serde_json (already in deps for persistence).
+//!
+//! DEMIGOD fork (risk-review item 2): the self-update entry points
+//! (`self_update`, `auto_update`) are disabled — the pinned binary is
+//! operator-managed. The machinery below is kept for its unit tests, hence
+//! the crate-wide dead-code allowance for this module.
+#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 use std::env;
@@ -2106,126 +2112,12 @@ fn homebrew_cellar_keg_root(path: &Path) -> Option<PathBuf> {
 // ---------------------------------------------------------------------------
 
 /// Manual self-update command (`herdr update`).
-pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
-    let channel = UpdateChannel::configured();
-
-    if is_homebrew_managed_install() {
-        if channel == UpdateChannel::Preview {
-            return Err(
-                "self-update is disabled for Homebrew installs; preview is only available for direct Herdr installs".into(),
-            );
-        }
-        return Err(format!(
-            "self-update is disabled for Homebrew installs; run `{HOMEBREW_UPDATE_COMMAND}`"
-        ));
-    }
-
-    if is_mise_managed_install() {
-        if channel == UpdateChannel::Preview {
-            return Err(
-                "self-update is disabled for mise installs; preview is only available for direct Herdr installs".into(),
-            );
-        }
-        return Err(format!(
-            "self-update is disabled for mise installs; run `{MISE_UPDATE_COMMAND}`"
-        ));
-    }
-
-    if is_nix_managed_install() {
-        if channel == UpdateChannel::Preview {
-            return Err(
-                "self-update is disabled for Nix installs; preview is only available for direct Herdr installs".into(),
-            );
-        }
-        return Err(
-            "self-update is disabled for Nix installs; update with `nix profile upgrade` or update the flake input that provides Herdr".into(),
-        );
-    }
-
-    if running_inside_herdr() {
-        return Err("run `herdr update` outside herdr after detaching from the session".into());
-    }
-
-    eprintln!("checking {} channel for updates...", channel.as_str());
-
-    let current = Version::current();
-
-    let release = match check_latest()? {
-        Some(r) => r,
-        None => {
-            eprintln!("already up to date ({})", crate::build_info::version());
-            return Ok(current);
-        }
-    };
-
-    if let Some(commit) = &release.commit {
-        tracing::info!(commit = %commit, build_id = ?release.build_id, "selected preview update build");
-    }
-    if let Err(e) = crate::release_notes::save_pending(release.label(), &release.notes_body) {
-        tracing::warn!("failed to save pending release notes: {e}");
-    }
-
-    #[cfg(windows)]
-    {
-        let _ = options;
-
-        eprintln!(
-            "installing {} with the Windows installer...",
-            release.label()
-        );
-        if let Some(sha256) = &release.sha256 {
-            tracing::debug!(sha256 = %sha256, "selected Windows update asset has checksum");
-        }
-        eprintln!("downloading {}...", release.label());
-        let downloaded_update = download_windows_update(&release)?;
-        eprintln!("downloaded {}", release.label());
-        install_windows_update_with_installer(&release, &downloaded_update)?;
-        let updated_exe = windows_installed_herdr_exe_path()?;
-        eprintln!("installed {}", release.label());
-        print_outdated_integration_notice_with_updated_binary(&updated_exe);
-        eprintln!(
-            "Open a new terminal, or reconnect SSH, then start Herdr again to use the updated client. Running servers remain active; restart them later only if you need server-side changes from {}.",
-            release.label()
-        );
-        print_saved_machine_update_notice();
-    }
-
-    #[cfg(not(windows))]
-    {
-        let running_server_plans = plan_running_server_updates(&release)?;
-        let server_update_decisions =
-            confirm_running_server_update_action(running_server_plans, &release, options)?;
-
-        eprintln!("downloading {}...", release.label());
-        let downloaded_update = download_update(&release)?;
-        let updated_exe = downloaded_update.current_exe.clone();
-        eprintln!("downloaded {}", release.label());
-        if !options.live_handoff
-            && !prompt_to_complete_plain_update(&server_update_decisions, &release)?
-        {
-            eprintln!("Herdr was not updated.");
-            eprintln!("Stop running Herdr sessions when ready, then run `herdr update` again.");
-            return Ok(current);
-        }
-        install_downloaded_update(downloaded_update)?;
-        eprintln!("installed {}", release.label());
-        let server_update_decisions = if options.live_handoff {
-            server_update_decisions
-        } else {
-            mark_plain_update_stop_decisions(server_update_decisions)
-        };
-        let server_update_outcomes = apply_running_session_update_decisions(
-            &release,
-            &updated_exe,
-            server_update_decisions,
-        )?;
-        print_outdated_integration_notice_with_updated_binary(&updated_exe);
-
-        print_running_session_update_outcomes(&server_update_outcomes, &release);
-        print_saved_machine_update_notice();
-    }
-
-    Ok(release.version)
+///
+/// DEMIGOD fork (risk-review item 2): self-update is disabled. The pinned
+/// binary is deployed and updated by the operator, never by the process
+/// itself. The CLI entry point also refuses `herdr update` (see main.rs).
+pub fn self_update(_options: SelfUpdateOptions) -> Result<Version, String> {
+    Err("self-update is disabled in this build; the pinned herdr binary is operator-managed".into())
 }
 
 fn print_saved_machine_update_notice() {
@@ -2343,85 +2235,11 @@ fn print_outdated_integration_notice_with_updated_binary(updated_exe: &Path) {
     }
 }
 
-/// Background update check: only surface availability and release notes.
-/// Runs in a background thread at startup.
-pub fn auto_update(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
-    crate::logging::update_check_started();
-    if let Ok(version) = env::var(FAKE_UPDATE_VERSION_ENV) {
-        let version = version.trim();
-        if !version.is_empty() {
-            tracing::info!(
-                env = FAKE_UPDATE_VERSION_ENV,
-                version,
-                "using fake update version for local testing"
-            );
-            if let Err(e) =
-                crate::release_notes::save_pending(version, &fake_release_notes_body(version))
-            {
-                tracing::warn!("failed to save fake pending release notes: {e}");
-            }
-            let _ = events.blocking_send(crate::events::AppEvent::UpdateReady {
-                version: version.to_string(),
-                install_command: update_install_command().to_string(),
-            });
-        }
-        return;
-    }
-
-    let configured_channel = UpdateChannel::configured();
-    if is_homebrew_managed_install() {
-        if configured_channel == UpdateChannel::Preview {
-            crate::logging::update_check_failed(
-                "preview channel is not available for Homebrew installs",
-            );
-            return;
-        }
-        auto_update_homebrew(events);
-        return;
-    }
-
-    if is_mise_managed_install() && configured_channel == UpdateChannel::Preview {
-        crate::logging::update_check_failed("preview channel is not available for mise installs");
-        return;
-    }
-
-    let nix_managed_install = is_nix_managed_install();
-    if nix_managed_install && configured_channel == UpdateChannel::Preview {
-        crate::logging::update_check_failed("preview channel is not available for Nix installs");
-        return;
-    }
-
-    let release = match check_latest() {
-        Ok(Some(r)) => r,
-        Ok(None) => return,
-        Err(err) => {
-            crate::logging::update_check_failed(&err);
-            return;
-        }
-    };
-
-    crate::logging::update_available(release.label());
-    tracing::info!(
-        "new {} build available at {}",
-        release.channel.as_str(),
-        release.download_url
-    );
-
-    if let Err(e) = crate::release_notes::save_pending(release.label(), &release.notes_body) {
-        tracing::warn!("failed to save pending release notes: {e}");
-    }
-
-    tracing::info!(
-        "auto-update check: {} available, waiting for explicit install",
-        release.label()
-    );
-
-    // Notify the TUI — blocking_send is safe from a std::thread
-    let _ = events.blocking_send(crate::events::AppEvent::UpdateReady {
-        version: release.label().to_string(),
-        install_command: update_install_command().to_string(),
-    });
-}
+/// Background update check: disabled in this build.
+///
+/// DEMIGOD fork (risk-review item 2): the server never checks for or
+/// downloads new versions. The pinned binary is operator-managed.
+pub fn auto_update(_events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {}
 
 fn auto_update_homebrew(events: tokio::sync::mpsc::Sender<crate::events::AppEvent>) {
     let version = match check_homebrew_latest() {

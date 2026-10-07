@@ -127,9 +127,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # channel = "stable"
 
 # Check herdr.dev for new Herdr versions in the background.
+# DEMIGOD fork: disabled in this build; the pinned binary is operator-managed.
 # version_check = true
 
 # Check herdr.dev for remote agent-detection manifest updates in the background.
+# DEMIGOD fork: disabled in this build; manifests are vendored and frozen.
 # manifest_check = true
 
 [keys]
@@ -521,6 +523,12 @@ fn main() -> io::Result<()> {
     if let Some(result) = platform::maybe_activate_desktop_notification(&raw_args) {
         return result;
     }
+    // DEMIGOD fork (SSH federation default-off): --machine is refused.
+    if raw_args.iter().any(|a| a == "--machine") {
+        eprintln!("error: --machine (SSH federation) is disabled in this build");
+        eprintln!("this binary is a headless session server");
+        std::process::exit(2);
+    }
     if let Some(outcome) = cli::maybe_run_machine(&raw_args) {
         return finish_cli(outcome);
     }
@@ -540,6 +548,30 @@ fn main() -> io::Result<()> {
             std::process::exit(2);
         }
     };
+
+    // DEMIGOD fork: SSH federation (--remote, machine, remote bridges), the
+    // self-updater (update, channel), and the interactive TUI client are
+    // disabled. This binary is a headless session server: `herdr server`
+    // plus the JSON socket API. See DEMIGOD-CHANGES.md.
+    if remote_launch.is_some() {
+        eprintln!("error: --remote (SSH federation) is disabled in this build");
+        std::process::exit(2);
+    }
+    if let Some(subcommand) = args.get(1).map(String::as_str) {
+        if matches!(
+            subcommand,
+            "update"
+                | "channel"
+                | "machine"
+                | "client"
+                | "remote-api-bridge"
+                | "remote-client-bridge"
+        ) {
+            eprintln!("error: `herdr {subcommand}` is disabled in this build");
+            eprintln!("run `herdr server` for the headless session server");
+            std::process::exit(2);
+        }
+    }
 
     if remote_launch.is_some()
         && args.get(1).is_some()
@@ -606,6 +638,8 @@ fn main() -> io::Result<()> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         platform::begin_cli_output();
         println!("herdr — terminal workspace manager for AI coding agents");
+        println!("demigod build: headless session server only — the interactive");
+        println!("TUI, SSH federation, and self-update are disabled.");
         println!();
         println!("Usage: herdr [options]");
         println!("       herdr --session <name> [options]");
@@ -797,13 +831,12 @@ fn main() -> io::Result<()> {
     let loaded_config = config::Config::load();
     exit_if_nested_disabled(&loaded_config.config);
 
-    let saved_federation =
-        client::endpoint::EndpointCatalog::load().is_ok_and(|catalog| catalog.has_enabled_ssh());
-    if let Err(err) = server::autodetect::auto_detect_launch(saved_federation) {
-        eprintln!("herdr: {err}");
-        std::process::exit(1);
-    }
-    Ok(())
+    // DEMIGOD fork: the interactive TUI is disabled. This binary runs the
+    // headless session server only (`herdr server`); supervisors drive it
+    // over the JSON socket API.
+    eprintln!("error: the interactive TUI is disabled in this build");
+    eprintln!("run `herdr server` to start the headless session server");
+    std::process::exit(2);
 }
 
 #[cfg(test)]

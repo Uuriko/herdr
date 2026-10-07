@@ -3,9 +3,7 @@ use std::time::Instant;
 #[cfg(test)]
 use std::time::Duration;
 
-use super::{
-    background_update_check_enabled, App, AUTO_UPDATE_CHECK_INTERVAL, MIN_RENDER_INTERVAL,
-};
+use super::{App, MIN_RENDER_INTERVAL};
 fn retain_detached_process_after_wait(
     pid: u32,
     result: std::io::Result<Option<std::process::ExitStatus>>,
@@ -95,49 +93,15 @@ impl App {
     }
 
     pub(crate) fn run_auto_update_check(&mut self) {
-        if !background_update_check_enabled(
-            self.policy.background_updates,
-            self.update_version_check_enabled,
-        ) {
-            self.next_auto_update_check = None;
-            return;
-        }
-
-        self.next_auto_update_check = self
-            .state
-            .update_available
-            .is_none()
-            .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL);
-
-        if self.state.update_available.is_some() {
-            return;
-        }
-
-        let update_tx = self.event_tx.clone();
-        if let Err(err) = crate::thread_spawn::spawn_named("herdr-update-check", move || {
-            crate::update::auto_update(update_tx)
-        }) {
-            tracing::warn!(err = %err, "failed to spawn update check thread");
-        }
+        // DEMIGOD fork (risk-review item 2): self-update checks are disabled.
+        // The pinned binary is updated by the operator, never by the server.
+        self.next_auto_update_check = None;
     }
 
     pub(crate) fn run_agent_manifest_update_check(&mut self) {
-        if !background_update_check_enabled(
-            self.policy.background_updates,
-            self.update_manifest_check_enabled,
-        ) {
-            self.next_agent_manifest_update_check = None;
-            return;
-        }
-
-        self.next_agent_manifest_update_check = Some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL);
-
-        let manifest_update_tx = self.event_tx.clone();
-        if let Err(err) = crate::thread_spawn::spawn_named("herdr-manifest-check", move || {
-            crate::detect::manifest_update::auto_update(manifest_update_tx)
-        }) {
-            tracing::warn!(err = %err, "failed to spawn agent manifest check thread");
-        }
+        // DEMIGOD fork (risk-review item 1): remote manifest catalog updates
+        // are disabled; manifests are frozen at the vendored set.
+        self.next_agent_manifest_update_check = None;
     }
 
     pub(crate) fn next_headless_loop_deadline_with_git_refresh(
