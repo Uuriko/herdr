@@ -26,6 +26,16 @@ pub(crate) const GROK_HOME_ENV_VAR: &str = "GROK_HOME";
 pub(crate) const HERMES_HOME_ENV_VAR: &str = "HERMES_HOME";
 
 pub(crate) fn apply_pane_base_env(cmd: &mut CommandBuilder) {
+    // DEMIGOD fork (risk-review item 12): HERDR_* markers are always set by
+    // the server, never inherited from the operator's environment. Scrub any
+    // inherited values first so a poisoned operator env cannot redirect panes
+    // to a foreign socket or binary.
+    cmd.env_remove(crate::api::SOCKET_PATH_ENV_VAR);
+    cmd.env_remove("HERDR_BIN_PATH");
+    cmd.env_remove(crate::HERDR_ENV_VAR);
+    cmd.env_remove(HERDR_PANE_ID_ENV_VAR);
+    cmd.env_remove(HERDR_TAB_ID_ENV_VAR);
+    cmd.env_remove(HERDR_WORKSPACE_ID_ENV_VAR);
     cmd.env(crate::api::SOCKET_PATH_ENV_VAR, crate::api::socket_path());
     if let Ok(executable) = crate::platform::launch_executable() {
         cmd.env("HERDR_BIN_PATH", executable);

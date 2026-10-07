@@ -11,13 +11,18 @@ pub(super) fn run_server_command(args: &[String]) -> std::io::Result<Option<i32>
     };
 
     match subcommand {
-        "stop" => server_stop(&args[1..]).map(Some),
+        // DEMIGOD fork (risk-review item 6): server.stop, server.reload_config
+        // and server.reload_agent_manifests are removed from the socket API.
+        // Refuse them in the CLI too, with a clear message.
+        "stop" | "reload-config" | "reload-agent-manifests" => {
+            eprintln!("error: `herdr server {subcommand}` is disabled in this build");
+            eprintln!("see DEMIGOD-CHANGES.md for the fork strip list");
+            Ok(Some(2))
+        }
         "live-handoff" => server_live_handoff(&args[1..]).map(Some),
         "--handoff-import" => Ok(None),
-        "reload-config" => server_reload_config(&args[1..]).map(Some),
         "agent-manifests" => server_agent_manifests(&args[1..]).map(Some),
         "update-agent-manifests" => server_update_agent_manifests(&args[1..]).map(Some),
-        "reload-agent-manifests" => server_reload_agent_manifests(&args[1..]).map(Some),
         "help" | "--help" | "-h" => {
             print_server_help();
             Ok(Some(0))
@@ -27,37 +32,6 @@ pub(super) fn run_server_command(args: &[String]) -> std::io::Result<Option<i32>
             Ok(Some(2))
         }
     }
-}
-
-fn server_stop(args: &[String]) -> std::io::Result<i32> {
-    if !args.is_empty() {
-        eprintln!("usage: herdr server stop");
-        return Ok(2);
-    }
-
-    if super::target::is_remote() {
-        return super::send_ok_request(Method::ServerStop(EmptyParams::default()));
-    }
-
-    match crate::session::stop_active_server() {
-        Ok(()) => Ok(0),
-        Err(err) => {
-            eprintln!("{err}");
-            Ok(1)
-        }
-    }
-}
-
-fn server_reload_config(args: &[String]) -> std::io::Result<i32> {
-    if !args.is_empty() {
-        eprintln!("usage: herdr server reload-config");
-        return Ok(2);
-    }
-
-    super::print_response(&super::send_request(&Request {
-        id: "cli:server:reload-config".into(),
-        method: Method::ServerReloadConfig(EmptyParams::default()),
-    })?)
 }
 
 fn server_agent_manifests(args: &[String]) -> std::io::Result<i32> {
@@ -80,18 +54,6 @@ fn server_agent_manifests(args: &[String]) -> std::io::Result<i32> {
 
     print_agent_manifest_status(&response);
     Ok(0)
-}
-
-fn server_reload_agent_manifests(args: &[String]) -> std::io::Result<i32> {
-    if !args.is_empty() {
-        eprintln!("usage: herdr server reload-agent-manifests");
-        return Ok(2);
-    }
-
-    super::print_response(&super::send_request(&Request {
-        id: "cli:server:reload-agent-manifests".into(),
-        method: Method::ServerReloadAgentManifests(EmptyParams::default()),
-    })?)
 }
 
 fn server_update_agent_manifests(args: &[String]) -> std::io::Result<i32> {

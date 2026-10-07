@@ -21,7 +21,7 @@ use crate::ipc::{
     poll_local_stream_read, remove_socket_file_if_owned, set_local_stream_polling,
     socket_file_identity, LocalStream, LocalStreamRead, SocketFileIdentity,
 };
-use crate::server::shutdown::{ServerStop, ShutdownReason};
+use crate::server::shutdown::ServerStop;
 
 #[cfg(test)]
 mod subscription_socket_tests;
@@ -93,15 +93,23 @@ fn start_server_inner(
     info!(path = %path.display(), "api server listening");
 
     #[cfg(unix)]
-    let ssh_agents = match crate::platform::ssh_agent::SshAgentRegistry::new(
-        crate::platform::ssh_agent::socket_path(),
-        std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from),
-    ) {
-        Ok(registry) => Some(registry),
-        Err(error) => {
-            warn!(%error, "SSH agent refresh unavailable; retaining inherited pane environment");
-            None
+    let ssh_agents = if demigod_ssh_agent_registration_enabled() {
+        match crate::platform::ssh_agent::SshAgentRegistry::new(
+            crate::platform::ssh_agent::socket_path(),
+            std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from),
+        ) {
+            Ok(registry) => Some(registry),
+            Err(error) => {
+                warn!(%error, "SSH agent refresh unavailable; retaining inherited pane environment");
+                None
+            }
         }
+    } else {
+        // DEMIGOD fork (SSH federation default-off): ssh-agent bridging is
+        // opt-in via DEMIGOD_SSH_AGENT_REGISTRATION=1. Default off: no
+        // registry socket is created and server.ssh_agent.register reports
+        // unavailable.
+        None
     };
 
     if let Some(capabilities) = capabilities.as_mut() {
@@ -334,6 +342,15 @@ fn handle_connection_with_stop(
     server_stop: Option<&ServerStop>,
     #[cfg(unix)] ssh_agents: Option<&crate::platform::ssh_agent::SshAgentRegistry>,
 ) -> std::io::Result<()> {
+    // DEMIGOD fork hardening (risk-review item 8): same-UID connection gate.
+    // Converts "any local process with socket-file access" into "same-UID only".
+    // Pane children inherit the socket path, so they are unaffected (same UID).
+    #[cfg(unix)]
+    if !demigod_peer_is_same_uid(&stream) {
+        warn!("rejected api connection from a different uid");
+        return Ok(());
+    }
+
     if let Err(err) = stream.set_send_timeout(Some(STREAM_WRITE_TIMEOUT)) {
         debug!(err = %err, "api connection write timeout unavailable");
     }
@@ -487,9 +504,6 @@ fn handle_connection_with_stop(
         }
         method_body => {
             let (response_write_tx, response_write_rx) = std::sync::mpsc::channel();
-            let stop_caller = matches!(method_body, Method::ServerStop(_))
-                .then(|| crate::platform::local_stream_peer_description(&stream))
-                .flatten();
             let response = handle_request(
                 Request {
                     id: request_id.clone(),
@@ -498,7 +512,6 @@ fn handle_connection_with_stop(
                 api_tx,
                 capabilities,
                 server_stop,
-                stop_caller,
                 Some(response_write_rx),
             );
             let result = write_text_line_allow_disconnect(&mut stream, &response);
@@ -553,7 +566,6 @@ fn handle_request(
     api_tx: &ApiRequestSender,
     capabilities: Option<ServerCapabilities>,
     server_stop: Option<&ServerStop>,
-    stop_caller: Option<String>,
     response_write_complete: Option<std::sync::mpsc::Receiver<()>>,
 ) -> String {
     if matches!(&request.method, Method::Ping(_)) {
@@ -579,18 +591,20 @@ fn handle_request(
         );
     }
 
-    if matches!(&request.method, Method::ServerStop(_)) {
-        if let Some(server_stop) = server_stop {
-            server_stop.request(ShutdownReason::ApiStop {
-                caller: stop_caller,
-            });
-            return serde_json::to_string(&SuccessResponse {
-                id: request.id,
-                result: ResponseResult::Ok {},
-            })
-            .unwrap_or_else(|_| "{}".to_string());
-        }
-    } else if server_stop.is_some_and(ServerStop::is_requested) {
+    if let Some(removed) = demigod_removed_method_name(&request.method) {
+        return error_response_json(
+            request.id,
+            "method_removed",
+            format!(
+                "{removed} is disabled in this build; see DEMIGOD-CHANGES.md for the fork strip list"
+            ),
+        );
+    }
+
+    // DEMIGOD fork: server.stop is removed from the socket API (rejected
+    // above). A stop already in flight (process signals) still fails
+    // requests closed with server_unavailable.
+    if server_stop.is_some_and(ServerStop::is_requested) {
         return error_response_json(
             request.id,
             "server_unavailable",
@@ -599,6 +613,66 @@ fn handle_request(
     }
 
     dispatch_to_app(request, api_tx, None, response_write_complete, None)
+}
+
+/// DEMIGOD fork (SSH federation default-off): ssh-agent bridging into panes
+/// and server.ssh_agent.register are opt-in via
+/// DEMIGOD_SSH_AGENT_REGISTRATION=1. Default: off.
+#[cfg(unix)]
+fn demigod_ssh_agent_registration_enabled() -> bool {
+    std::env::var("DEMIGOD_SSH_AGENT_REGISTRATION")
+        .map(|value| value == "1")
+        .unwrap_or(false)
+}
+
+/// DEMIGOD fork hardening (risk-review item 8): same-UID check for a new
+/// JSON socket connection. Fails closed: unknown peer credentials are
+/// rejected, never allowed.
+#[cfg(unix)]
+fn demigod_peer_is_same_uid(stream: &LocalStream) -> bool {
+    match crate::platform::local_stream_peer_uid(stream) {
+        Some(peer_uid) => peer_uid == unsafe { libc::getuid() },
+        None => false,
+    }
+}
+
+/// DEMIGOD fork strip list (risk-review hardening items 4, 5, 6, 9, 10, 11).
+/// Returns the dotted method name when a JSON socket API method has been
+/// removed from this build. Checked in `handle_request` before any dispatch,
+/// so the removal holds no matter which internal handler still exists.
+/// Documented per-method in DEMIGOD-CHANGES.md.
+fn demigod_removed_method_name(method: &Method) -> Option<&'static str> {
+    match method {
+        // server.stop / reload_config / reload_agent_manifests (item 6)
+        Method::ServerStop(_) => Some("server.stop"),
+        Method::ServerReloadConfig(_) => Some("server.reload_config"),
+        Method::ServerReloadAgentManifests(_) => Some("server.reload_agent_manifests"),
+        // notification.show: no-op-or-remove (item 10) -> removed
+        Method::NotificationShow(_) => Some("notification.show"),
+        // layout.apply: env/cwd-setting removed (item 9) -> method removed
+        Method::LayoutApply(_) => Some("layout.apply"),
+        // integration.install network fetch (item 5); uninstall kept operator-local
+        Method::IntegrationInstall(_) => Some("integration.install"),
+        Method::IntegrationUninstall(_) => Some("integration.uninstall"),
+        // worktree.create: URL fetching removed (item 11) -> whole worktree surface removed
+        Method::WorktreeList(_) => Some("worktree.list"),
+        Method::WorktreeCreate(_) => Some("worktree.create"),
+        Method::WorktreeOpen(_) => Some("worktree.open"),
+        Method::WorktreeRemove(_) => Some("worktree.remove"),
+        // plugin subsystem (item 4): plugin.link at minimum; whole host removed
+        Method::PluginLink(_) => Some("plugin.link"),
+        Method::PluginList(_) => Some("plugin.list"),
+        Method::PluginUnlink(_) => Some("plugin.unlink"),
+        Method::PluginEnable(_) => Some("plugin.enable"),
+        Method::PluginDisable(_) => Some("plugin.disable"),
+        Method::PluginActionList(_) => Some("plugin.action.list"),
+        Method::PluginActionInvoke(_) => Some("plugin.action.invoke"),
+        Method::PluginLogList(_) => Some("plugin.log.list"),
+        Method::PluginPaneOpen(_) => Some("plugin.pane.open"),
+        Method::PluginPaneFocus(_) => Some("plugin.pane.focus"),
+        Method::PluginPaneClose(_) => Some("plugin.pane.close"),
+        _ => None,
+    }
 }
 
 pub(crate) fn api_method_name(method: &Method) -> &'static str {
@@ -1151,6 +1225,7 @@ fn error_response_json(id: String, code: &str, message: String) -> String {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::server::shutdown::ShutdownReason;
     use interprocess::local_socket::traits::Listener as _;
     use std::collections::HashMap;
     use std::io::{BufRead, BufReader, Read};
@@ -1503,7 +1578,6 @@ mod tests {
             }),
             None,
             None,
-            None,
         );
 
         let parsed: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -1512,31 +1586,41 @@ mod tests {
     }
 
     #[test]
-    fn server_stop_control_bypasses_app_channel() {
+    fn server_stop_is_rejected_by_demigod_fork_strip() {
+        // DEMIGOD fork: server.stop is removed from the socket API (risk-review
+        // hardening item 6). It must not reach the stop control, and no other
+        // request may be affected.
         let (tx, mut rx) = mpsc::unbounded_channel();
         let stop = ServerStop::default();
         let response = handle_request(
             Request {
-                id: "priority_stop".into(),
+                id: "rejected_stop".into(),
                 method: Method::ServerStop(crate::api::schema::EmptyParams::default()),
             },
             &tx,
             None,
             Some(&stop),
-            Some("pid 42 (herdr)".into()),
             None,
         );
 
         let response: serde_json::Value = serde_json::from_str(&response).unwrap();
-        assert_eq!(response["id"], "priority_stop");
-        assert_eq!(response["result"]["type"], "ok");
+        assert_eq!(response["id"], "rejected_stop");
+        assert_eq!(response["error"]["code"], "method_removed");
+        assert!(!stop.is_requested());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn server_stop_control_bypasses_app_channel() {
+        // The stop control itself still works (driven by process signals, not
+        // the socket): once a stop is requested, further requests fail closed
+        // with server_unavailable.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let stop = ServerStop::default();
+        stop.request(ShutdownReason::ApiStop {
+            caller: Some("pid 42 (herdr)".into()),
+        });
         assert!(stop.is_requested());
-        assert_eq!(
-            stop.take_reason(),
-            Some(ShutdownReason::ApiStop {
-                caller: Some("pid 42 (herdr)".into())
-            })
-        );
 
         let rejected = handle_request(
             Request {
@@ -1546,7 +1630,6 @@ mod tests {
             &tx,
             None,
             Some(&stop),
-            None,
             None,
         );
         let rejected: serde_json::Value = serde_json::from_str(&rejected).unwrap();
@@ -1563,9 +1646,8 @@ mod tests {
         };
 
         let request_for_thread = request.clone();
-        let thread = std::thread::spawn(move || {
-            handle_request(request_for_thread, &tx, None, None, None, None)
-        });
+        let thread =
+            std::thread::spawn(move || handle_request(request_for_thread, &tx, None, None, None));
 
         let msg = rx.blocking_recv().unwrap();
         assert_eq!(msg.request.id, "req_2");

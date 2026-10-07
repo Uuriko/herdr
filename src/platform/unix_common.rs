@@ -316,23 +316,15 @@ pub(crate) fn spawn_server_signal_monitor(
     }
 }
 
-/// Describes the process on the other end of a local socket, for logs.
-pub(crate) fn local_stream_peer_description(stream: &crate::ipc::LocalStream) -> Option<String> {
+/// DEMIGOD fork hardening (risk-review item 8): UID of the process on the
+/// other end of a local socket, for the same-UID connection gate.
+/// Returns None when the credential lookup is unavailable; the caller decides
+/// how to treat unknown peers (fail closed: reject).
+pub(crate) fn local_stream_peer_uid(stream: &crate::ipc::LocalStream) -> Option<u32> {
     use std::os::fd::{AsFd as _, AsRawFd as _};
 
     let crate::ipc::LocalStream::UdSocket(socket) = stream;
-    let pid = super::socket_peer_pid(socket.as_fd().as_raw_fd())?;
-    let Some((name, parent)) = super::process_name_and_parent(pid) else {
-        return Some(format!("pid {pid}"));
-    };
-    let mut description = format!("pid {pid} ({name})");
-    if parent > 1 {
-        description.push_str(&format!(", parent pid {parent}"));
-        if let Some((parent_name, _)) = super::process_name_and_parent(parent) {
-            description.push_str(&format!(" ({parent_name})"));
-        }
-    }
-    Some(description)
+    super::socket_peer_uid(socket.as_fd().as_raw_fd())
 }
 
 pub(crate) fn begin_cli_output() {

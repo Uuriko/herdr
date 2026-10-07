@@ -150,9 +150,22 @@ impl App {
         if !valid_agent_name(&name) {
             return Err(AgentStartError::InvalidName);
         }
+        // DEMIGOD fork (risk-review item 7): agent.start is deny-by-default.
+        // Operators opt agent kinds in with DEMIGOD_AGENT_KIND_ALLOWLIST
+        // (comma-separated canonical kind labels, e.g. "claude,codex").
+        // Caller args must additionally pass the allowlisted-flag check, so
+        // no caller-controlled argv or env reaches the pane beyond it.
         let Some(kind) = crate::detect::parse_agent_label(&params.kind) else {
             return Err(AgentStartError::UnsupportedKind(params.kind));
         };
+        if !demigod_agent_kind_allowed(kind) {
+            return Err(AgentStartError::KindNotAllowed(
+                crate::detect::agent_label(kind).to_string(),
+            ));
+        }
+        if let Err(message) = crate::agent_resume::validate_resume_flags(&params.args) {
+            return Err(AgentStartError::ForbiddenArgument(message));
+        }
         if params
             .args
             .iter()
@@ -243,6 +256,16 @@ impl App {
             AgentStartError::UnsupportedKind(kind) => crate::api::schema::ErrorBody {
                 code: "unsupported_agent_kind".into(),
                 message: format!("unsupported interactive agent kind {kind}"),
+            },
+            AgentStartError::KindNotAllowed(kind) => crate::api::schema::ErrorBody {
+                code: "agent_kind_not_allowed".into(),
+                message: format!(
+                    "agent kind {kind} is not allowlisted for agent.start in this build (DEMIGOD_AGENT_KIND_ALLOWLIST)"
+                ),
+            },
+            AgentStartError::ForbiddenArgument(message) => crate::api::schema::ErrorBody {
+                code: "forbidden_agent_argument".into(),
+                message,
             },
             AgentStartError::InvalidArgument => crate::api::schema::ErrorBody {
                 code: "invalid_agent_argument".into(),
@@ -449,6 +472,8 @@ fn live_runtime_agent(runtime: &crate::terminal::TerminalRuntime) -> Option<crat
 pub(super) enum AgentStartError {
     InvalidName,
     UnsupportedKind(String),
+    KindNotAllowed(String),
+    ForbiddenArgument(String),
     InvalidArgument,
     InvalidTimeout,
     TargetNotFound(String),
@@ -459,6 +484,19 @@ pub(super) enum AgentStartError {
         name: String,
         candidates: Vec<crate::api::schema::AgentInfo>,
     },
+}
+
+/// DEMIGOD fork (risk-review item 7): agent.start kind allowlist.
+/// Unset or empty DEMIGOD_AGENT_KIND_ALLOWLIST denies every kind.
+fn demigod_agent_kind_allowed(kind: crate::detect::Agent) -> bool {
+    const ENV: &str = "DEMIGOD_AGENT_KIND_ALLOWLIST";
+    match std::env::var(ENV) {
+        Ok(value) if !value.trim().is_empty() => {
+            let label = crate::detect::agent_label(kind);
+            value.split(',').map(str::trim).any(|entry| entry == label)
+        }
+        _ => false,
+    }
 }
 
 pub(super) enum AgentRenameError {

@@ -1,3 +1,8 @@
+// DEMIGOD fork (risk-review item 2): release-notes plumbing is inert without
+// the self-updater (the only writer was the update path). Helpers are kept
+// for their unit tests, hence the module-wide dead-code allowance.
+#![allow(dead_code)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 

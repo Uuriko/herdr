@@ -14,11 +14,21 @@ pub(crate) fn set_default_plugin_pane_pwd(
 }
 
 #[cfg(unix)]
+// DEMIGOD fork: orphaned by the server.stop removal. Kept for platform parity.
+#[allow(dead_code)]
 pub(super) fn socket_peer_pid(_fd: std::os::fd::RawFd) -> Option<u32> {
     None
 }
 
+/// DEMIGOD fork hardening (risk-review item 8): stub for other Unixes.
 #[cfg(unix)]
+pub(super) fn socket_peer_uid(_fd: std::os::fd::RawFd) -> Option<u32> {
+    None
+}
+
+#[cfg(unix)]
+// DEMIGOD fork: orphaned by the server.stop removal. Kept for platform parity.
+#[allow(dead_code)]
 pub(super) fn process_name_and_parent(_pid: u32) -> Option<(String, u32)> {
     None
 }

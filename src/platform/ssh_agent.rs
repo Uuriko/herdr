@@ -261,6 +261,12 @@ impl Drop for SshAgentLease {
 }
 
 pub(crate) fn apply_pane_env(command: &mut portable_pty::CommandBuilder) {
+    // DEMIGOD fork (SSH federation default-off): never inject SSH_AUTH_SOCK
+    // into panes unless the operator opted in with
+    // DEMIGOD_SSH_AGENT_REGISTRATION=1.
+    if std::env::var("DEMIGOD_SSH_AGENT_REGISTRATION").as_deref() != Ok("1") {
+        return;
+    }
     let path = socket_path();
     if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         command.env("SSH_AUTH_SOCK", path);

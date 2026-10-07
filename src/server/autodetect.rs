@@ -302,6 +302,9 @@ pub fn wait_for_server_socket(socket_path: &Path, timeout: Duration) -> io::Resu
 /// 1. Check if a server is listening on the client socket
 /// 2. If no server → spawn server daemon → wait for socket readiness
 /// 3. Run the thin client (which connects to the server)
+// DEMIGOD fork: the interactive TUI entry point is disabled (see main.rs);
+// kept for reference, unreachable in this build.
+#[allow(dead_code)]
 pub fn auto_detect_launch(saved_federation: bool) -> io::Result<()> {
     // The client requires terminal geometry before it can attach. Reject an
     // unusable terminal before socket lookup creates directories or starts a daemon.

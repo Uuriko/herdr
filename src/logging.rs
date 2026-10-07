@@ -341,6 +341,9 @@ pub(crate) fn session_restored(workspaces: usize, outcome: &'static str) {
     );
 }
 
+// DEMIGOD fork (risk-review item 2): self-update is disabled; kept for
+// the (disabled) update machinery.
+#[allow(dead_code)]
 pub(crate) fn update_check_started() {
     tracing::info!(
         event = "update.check.start",
@@ -350,6 +353,9 @@ pub(crate) fn update_check_started() {
     );
 }
 
+// DEMIGOD fork (risk-review item 2): self-update is disabled; kept for
+// the (disabled) update machinery.
+#[allow(dead_code)]
 pub(crate) fn update_check_failed(err: &str) {
     tracing::warn!(
         event = "update.check.complete",
@@ -360,6 +366,9 @@ pub(crate) fn update_check_failed(err: &str) {
     );
 }
 
+// DEMIGOD fork (risk-review item 2): self-update is disabled; kept for
+// the (disabled) update machinery.
+#[allow(dead_code)]
 pub(crate) fn update_available(version: &str) {
     tracing::info!(
         event = "update.available",

@@ -178,14 +178,6 @@ pub struct App {
 pub(crate) const APP_EVENT_CHANNEL_CAPACITY: usize = 256;
 pub(crate) const APP_EVENT_DRAIN_LIMIT: usize = 64;
 
-fn auto_updates_enabled(background_updates: bool) -> bool {
-    background_updates && !cfg!(debug_assertions)
-}
-
-fn background_update_check_enabled(background_updates: bool, check_enabled: bool) -> bool {
-    auto_updates_enabled(background_updates) && check_enabled
-}
-
 fn load_plugin_registry(
     persist_plugin_registry: bool,
     leases: &mut crate::plugin_installations::Leases,
@@ -579,31 +571,12 @@ impl App {
 
         state.terminals = restored_terminals;
 
-        // Background auto-update is disabled for non-persistent test apps
-        // and in debug/test builds so local development never mutates the
-        // running binary out from under spawned test processes.
-        let version_check_enabled =
-            background_update_check_enabled(policy.background_updates, config.update.version_check);
-        let manifest_check_enabled = background_update_check_enabled(
-            policy.background_updates,
-            config.update.manifest_check,
-        );
-        if version_check_enabled {
-            let update_tx = event_tx.clone();
-            if let Err(err) = crate::thread_spawn::spawn_named("herdr-update-check", move || {
-                crate::update::auto_update(update_tx)
-            }) {
-                tracing::warn!(err = %err, "failed to spawn update check thread");
-            }
-        }
-        if manifest_check_enabled {
-            let manifest_update_tx = event_tx.clone();
-            if let Err(err) = crate::thread_spawn::spawn_named("herdr-manifest-check", move || {
-                crate::detect::manifest_update::auto_update(manifest_update_tx)
-            }) {
-                tracing::warn!(err = %err, "failed to spawn agent manifest check thread");
-            }
-        }
+        // DEMIGOD fork (risk-review items 1, 2): background self-update and
+        // remote manifest catalog checks are disabled. The pinned binary and
+        // the vendored manifests are operator-managed; the server process
+        // never makes outbound update connections.
+        let version_check_enabled = false;
+        let manifest_check_enabled = false;
 
         let last_focus = state.active.and_then(|idx| {
             state
@@ -665,7 +638,10 @@ impl App {
             tab_bar_commands: Vec::new(),
             next_tab_bar_datetime_refresh: None,
             window_title_template: None,
-            persist_pane_history: config.experimental.pane_history,
+            // DEMIGOD fork (risk-review item 3): pane screen history is never
+            // persisted. The config knob is ignored; persisted scrollback is a
+            // secrets store on disk.
+            persist_pane_history: false,
             last_render_at: None,
             last_presentation_at: None,
             api_rx,
@@ -949,10 +925,10 @@ impl App {
             self.state.cjk_ime_agents = parse_cjk_ime_agents(&config.experimental.cjk_ime_agents);
             self.state.cjk_ime_cursor_shape =
                 config.experimental.cjk_ime_cursor_shape.to_decscusr();
-            self.persist_pane_history = config.experimental.pane_history;
-            if !self.persist_pane_history {
-                crate::persist::clear_history();
-            }
+            // DEMIGOD fork (risk-review item 3): pane_history stays off across
+            // config reloads; the config knob is ignored.
+            self.persist_pane_history = false;
+            crate::persist::clear_history();
         }
 
         if !invalid_section("server") {
@@ -968,34 +944,12 @@ impl App {
         }
 
         if !invalid_section("update") {
-            let now = Instant::now();
-            let previous_version_check_enabled = self.update_version_check_enabled;
-            let previous_manifest_check_enabled = self.update_manifest_check_enabled;
-            self.update_version_check_enabled = config.update.version_check;
-            self.update_manifest_check_enabled = config.update.manifest_check;
-
-            if !self.update_version_check_enabled {
-                self.next_auto_update_check = None;
-            } else if !previous_version_check_enabled
-                && background_update_check_enabled(
-                    self.policy.background_updates,
-                    self.update_version_check_enabled,
-                )
-                && self.state.update_available.is_none()
-            {
-                self.next_auto_update_check = Some(now);
-            }
-
-            if !self.update_manifest_check_enabled {
-                self.next_agent_manifest_update_check = None;
-            } else if !previous_manifest_check_enabled
-                && background_update_check_enabled(
-                    self.policy.background_updates,
-                    self.update_manifest_check_enabled,
-                )
-            {
-                self.next_agent_manifest_update_check = Some(now);
-            }
+            // DEMIGOD fork (risk-review items 1, 2): update checks stay
+            // disabled across config reloads.
+            self.update_version_check_enabled = false;
+            self.update_manifest_check_enabled = false;
+            self.next_auto_update_check = None;
+            self.next_agent_manifest_update_check = None;
         }
 
         if !invalid_section("terminal") {

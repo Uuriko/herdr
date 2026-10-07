@@ -936,6 +936,9 @@ fn bsdinfo_start_token(info: &libc::proc_bsdinfo) -> u64 {
         .saturating_add(info.pbi_start_tvusec)
 }
 
+// DEMIGOD fork: orphaned by the server.stop removal (its only caller,
+// local_stream_peer_description, was deleted). Kept for platform parity.
+#[allow(dead_code)]
 pub(super) fn socket_peer_pid(fd: RawFd) -> Option<u32> {
     let mut pid: libc::pid_t = 0;
     let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
@@ -951,6 +954,18 @@ pub(super) fn socket_peer_pid(fd: RawFd) -> Option<u32> {
     (result == 0 && pid > 0).then_some(pid as u32)
 }
 
+/// DEMIGOD fork hardening (risk-review item 8): peer UID via getpeereid.
+/// Used to reject socket connections from other UIDs.
+pub(super) fn socket_peer_uid(fd: RawFd) -> Option<u32> {
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    let result = unsafe { libc::getpeereid(fd, &mut uid, &mut gid) };
+    (result == 0).then_some(uid as u32)
+}
+
+// DEMIGOD fork: orphaned by the server.stop removal (its only caller,
+// local_stream_peer_description, was deleted). Kept for platform parity.
+#[allow(dead_code)]
 pub(super) fn process_name_and_parent(pid: u32) -> Option<(String, u32)> {
     let info = process_bsdinfo(pid)?;
     Some((comm_from_bsdinfo(&info)?, info.pbi_ppid))

@@ -242,17 +242,6 @@ pub fn stop_session(name: Option<&str>) -> Result<SessionInfo, String> {
     stop_session_with_timeout(name, STOP_WAIT_TIMEOUT)
 }
 
-pub(crate) fn stop_active_server() -> Result<(), String> {
-    let socket_path = active_api_socket_path();
-    let client_socket_path = crate::server::socket_paths::client_socket_path();
-    stop_socket_with_timeout(
-        socket_path.clone(),
-        vec![socket_path, client_socket_path],
-        STOP_WAIT_TIMEOUT,
-        "server",
-    )
-}
-
 fn stop_session_with_timeout(name: Option<&str>, timeout: Duration) -> Result<SessionInfo, String> {
     let socket_path = api_socket_path_for(name);
     let client_socket_path = client_socket_path_for(name);
